@@ -24,7 +24,7 @@ from typing import Generator
 
 import numpy as np
 from pymmcore_plus import CMMCorePlus
-from scipy.ndimage import center_of_mass
+from scipy.ndimage import center_of_mass, gaussian_filter
 
 import cellcast.models.StarDist2D as sd
 import tensorstore as ts
@@ -133,16 +133,20 @@ class DataDrivenAcquisition(Iterable[MDAEvent]):
 
 
     def _process(self, img: np.ndarray, event: MDAEvent) -> None:
-        # Find nuclei
-        labels = self._model.predict_fluo(img).astype(np.uint32)
+        # -- Find nuclei -- #
+        # Lowpass filter, reduce noise
+        gaussed = gaussian_filter(img, sigma=1)
+        # Segment nuclei usign StarDist2D
+        labels = self._model.predict_fluo(gaussed).astype(np.uint32)
         # Highlight labels in the low-res scan
         px, py = self._stage_to_px(event.x_pos or 0, event.y_pos or 0)
         h, w = self._mmc.getImageHeight(), self._mmc.getImageWidth()
+        # Store (and paint) the labels
         self._low_res_datastore[1, 0, py:py + h, px:px + w] = labels
-        # Compute centroids for each label
-        centroids = center_of_mass(labels > 0, labels, index=range(1, labels.max() + 1))
+
+        # -- Compute POIs for high-res scan -- #
         pixel_size = self._mmc.getPixelSizeUm()
-        for cy, cx in centroids:
+        for cy, cx in center_of_mass(labels > 0, labels, index=range(1, labels.max() + 1)):
             # Highlight centroids in the low-res scan
             cx1, cx2 = floor(cx), ceil(cx)
             cy1, cy2 = floor(cy), ceil(cy)
