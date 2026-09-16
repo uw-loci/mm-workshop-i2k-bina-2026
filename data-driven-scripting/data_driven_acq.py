@@ -72,8 +72,8 @@ class DataDrivenAcquisition(Iterable[MDAEvent]):
     def __init__(self, mmcore: CMMCorePlus) -> None:
         self._mmc = mmcore
 
-        self._fov_widths = 5
-        self._fov_heights = 5
+        self._fov_widths = 11
+        self._fov_heights = 11
 
         self._low_res_datastore: ts.TensorStore = self._new_datastore(DATA_PATH / 'dataset/', channels=3, fov_x=self._fov_widths, fov_y=self._fov_heights)
         self._low_res_viewer = ndv.ArrayViewer(self._low_res_datastore, channel_mode="composite", channel_axis=0)
