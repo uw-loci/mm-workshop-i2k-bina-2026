@@ -92,12 +92,12 @@ class DataDrivenAcquisition(Iterable[MDAEvent]):
         self._mmc.mda.events.frameReady.connect(self.on_image)
         self._model = sd.init_fluo(gpu=True)
 
-    def _new_datastore(self, path: str, channels: int = 1, fov_x: int = 1, fov_y: int = 1, z: int = 1) -> ts.TensorStore:
+    def _new_datastore(self, path: str | Path, channels: int = 1, fov_x: int = 1, fov_y: int = 1, z: int = 1) -> ts.TensorStore:
         return ts.open({
             'driver': 'n5',
             'kvstore': {
                 'driver': 'file',
-                'path': path,
+                'path': str(path),
             },
             'metadata': {
                 'compression': {
