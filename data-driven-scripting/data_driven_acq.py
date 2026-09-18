@@ -6,6 +6,7 @@
 #   "cellcast==0.3.0",
 #   "ndv==0.5.0",
 #   "numpy==2.5.3",
+#   "ome-writers==0.3.2",
 #   "pymmcore-plus==0.18.1",
 #   "pyqt6==6.11.0",
 #   "qtpy==2.4.3",
@@ -16,21 +17,23 @@
 # ]
 # ///
 
-from collections import deque
-from collections.abc import Iterable
 from pathlib import Path
 from math import floor, ceil
-from typing import Generator
+from typing import TYPE_CHECKING, Generator
 
 import numpy as np
+from ome_writers import AcquisitionSettings, Dimension, Position, create_stream
+from superqt.utils import ensure_main_thread
 from pymmcore_plus import CMMCorePlus
 from scipy.ndimage import center_of_mass, gaussian_filter
 
 import cellcast.models.StarDist2D as sd
-import tensorstore as ts
 
 import ndv
-from useq import MDAEvent
+from useq import MDAEvent, MDASequence, GridRowsColumns, Position as UseqPosition
+
+if TYPE_CHECKING:
+    from ome_writers import StreamView
 
 ROOT_DIR = Path(__file__).resolve().parent
 CFG_PATH = ROOT_DIR / "SimCamera.cfg"
@@ -39,14 +42,6 @@ DATA_PATH = ROOT_DIR / "data"
 LOW_RES_LABEL = "10x 0.30NA"
 HIGH_RES_LABEL = "100x 1.40NA Oil"
 
-# TODO: Rewrite as low-res scan, then high-res POIs afterwards
-#   This could be a setting in the script, and we could talk about the tradeoffs
-# TODO: Enable POI decisions based on saved low-res scans
-# TODO: Consider one file per high-res scan
-# TODO: Save out positional metadata for the high-res scans (maybe use ome-writers?)
-# TODO: Consider rewriting the script in multiple pieces? A low-res scan piece, then a decision piece, then a high-res scan piece
-
-DEFAULT_GRID_SIZE = 3
 
 def initialize_core(mmc: CMMCorePlus | None = None) -> CMMCorePlus:
     mmc = mmc or CMMCorePlus()
@@ -67,52 +62,29 @@ def initialize_core(mmc: CMMCorePlus | None = None) -> CMMCorePlus:
 
     return mmc
 
-class DataDrivenAcquisition(Iterable[MDAEvent]):
+
+class LowResAcquisition:
 
     def __init__(self, mmcore: CMMCorePlus) -> None:
         self._mmc = mmcore
+        self._fov_widths = 3
+        self._fov_heights = 3
 
-        self._fov_widths = 11
-        self._fov_heights = 11
+        self._visual = np.zeros(
+            (3, self._fov_heights * mmcore.getImageHeight(), self._fov_widths * mmcore.getImageWidth()),
+            dtype=np.uint16,
+        )
+        self._viewer = ndv.ArrayViewer(self._visual, channel_mode="composite", channel_axis=0)
+        self._viewer.show()
+        self._viewer.widget().setWindowTitle("Slide scan")
 
-        self._low_res_datastore: ts.TensorStore = self._new_datastore(DATA_PATH / 'dataset/', channels=3, fov_x=self._fov_widths, fov_y=self._fov_heights)
-        self._low_res_viewer = ndv.ArrayViewer(self._low_res_datastore, channel_mode="composite", channel_axis=0)
-        self._low_res_viewer.show()
-        self._low_res_viewer.widget().setWindowTitle("Slide scan")
-
-        # self._high_res_datastores: dict[int, ts.TensorStore] = {}
-        self._high_res_datastore = self._new_datastore(DATA_PATH / 'high_res/', z=100)
-        self._high_res_index = -1
-        self._high_res_viewer = ndv.ArrayViewer(self._high_res_datastore, channel_mode="composite", channel_axis=0)
-        self._high_res_viewer.widget().setWindowTitle("Nuclei scans")
-        self._high_res_viewer.show()
-
-        self._centroids_to_process = deque()
-
-        self._mmc.mda.events.frameReady.connect(self.on_image)
+        self._centroids: list[tuple[float, float]] = []
         self._model = sd.init_fluo(gpu=True)
+        self._mmc.mda.events.frameReady.connect(self._on_image)
 
-    def _new_datastore(self, path: str | Path, channels: int = 1, fov_x: int = 1, fov_y: int = 1, z: int = 1) -> ts.TensorStore:
-        return ts.open({
-            'driver': 'n5',
-            'kvstore': {
-                'driver': 'file',
-                'path': str(path),
-            },
-            'metadata': {
-                'compression': {
-                    'type': 'gzip'
-                },
-                'dataType': 'uint32',
-                'dimensions': [channels, z, fov_y * self._mmc.getImageHeight(), fov_x * self._mmc.getImageWidth()],
-                'blockSize': [1, 1, self._mmc.getImageHeight(), self._mmc.getImageWidth()],
-            },
-            'create': True,
-            'delete_existing': True,
-        }).result()
-
-    def __iter__(self) -> Iterable[MDAEvent]:
-        return self
+    @property
+    def centroids(self) -> list[tuple[float, float]]:
+        return self._centroids
 
     def _stage_to_px(self, x_um: float, y_um: float) -> tuple[int, int]:
         pixel_size = self._mmc.getPixelSizeUm()
@@ -120,92 +92,138 @@ class DataDrivenAcquisition(Iterable[MDAEvent]):
         py = int(y_um / pixel_size) + (self._fov_heights // 2) * self._mmc.getImageHeight()
         return px, py
 
-    def on_image(self, img: np.ndarray, event: MDAEvent, _: dict) -> None:
+    def _on_image(self, img: np.ndarray, event: MDAEvent, _: dict) -> None:
+        if "g" not in event.index:
+            return
+        self._low_stream.append(img)
         h, w = self._mmc.getImageHeight(), self._mmc.getImageWidth()
-        if "low_idx" in event.index:
-            px, py = self._stage_to_px(event.x_pos or 0, event.y_pos or 0)
-            self._low_res_datastore[0, 0, py:py + h, px:px + w] = img
-            self._low_res_viewer.data_wrapper.data_changed.emit()
-            self._process(img, event)
-        if "high_idx" in event.index:
-            self._high_res_datastore[0, event.index["high_idx"], 0:h, 0:w] = img
-            self._high_res_viewer.data_wrapper.data_changed.emit()
-
+        px, py = self._stage_to_px(event.x_pos or 0, event.y_pos or 0)
+        self._visual[0, py:py + h, px:px + w] = img
+        self._viewer.data_wrapper.data_changed.emit()
+        self._process(img, event)
 
     def _process(self, img: np.ndarray, event: MDAEvent) -> None:
-        # -- Find nuclei -- #
-        # Lowpass filter, reduce noise
         gaussed = gaussian_filter(img, sigma=1)
-        # Segment nuclei usign StarDist2D
-        labels = self._model.predict_fluo(gaussed).astype(np.uint32)
-        # Highlight labels in the low-res scan
+        labels = self._model.predict_fluo(gaussed).astype(np.uint16)
         px, py = self._stage_to_px(event.x_pos or 0, event.y_pos or 0)
         h, w = self._mmc.getImageHeight(), self._mmc.getImageWidth()
-        # Store (and paint) the labels
-        self._low_res_datastore[1, 0, py:py + h, px:px + w] = labels
-
-        # -- Compute POIs for high-res scan -- #
+        self._visual[1, py:py + h, px:px + w] = labels
         pixel_size = self._mmc.getPixelSizeUm()
         for cy, cx in center_of_mass(labels > 0, labels, index=range(1, labels.max() + 1)):
-            # Highlight centroids in the low-res scan
             cx1, cx2 = floor(cx), ceil(cx)
             cy1, cy2 = floor(cy), ceil(cy)
-            self._low_res_datastore[2, 0, py + cy1:py + cy2 + 1, px + cx1:px + cx2 + 1] = 1
-            # Store centroids for high-res scan
+            self._visual[2, py + cy1:py + cy2 + 1, px + cx1:px + cx2 + 1] = 1
             stage_cx = (event.x_pos or 0) + (cx - w / 2) * pixel_size
             stage_cy = (event.y_pos or 0) + (cy - h / 2) * pixel_size
-            self._centroids_to_process.append((stage_cy, stage_cx))
+            self._centroids.append((stage_cy, stage_cx))
 
     def events(self) -> Generator[MDAEvent, None, None]:
-        # Perform a low-resolution scan...
-        for event in self._low_res_scan():
-            yield event
-            # ...until we find an interesting point...
-            while self._centroids_to_process:
-                # ...where we pause to perform a high-resolution scan
-                yield from self._high_res_scan(self._centroids_to_process.popleft())
+        w, h = self._mmc.getImageWidth(), self._mmc.getImageHeight()
+        px_size = self._mmc.getPixelSizeUm()
+        grid_plan = GridRowsColumns(
+            rows=self._fov_heights,
+            columns=self._fov_widths,
+            fov_height=h * px_size,
+            fov_width=w * px_size,
+        )
+        settings = AcquisitionSettings(
+            root_path=str(DATA_PATH / "low_res.ome.zarr"),
+            dimensions=[
+                Dimension(
+                    name="p",
+                    type="position",
+                    coords=[
+                        Position(
+                            name=f"Tile_{pt.name}",
+                            grid_row=pt.grid_row,
+                            grid_column=pt.grid_col,
+                            x_coord=pt.x,
+                            y_coord=pt.y,
+                        )
+                        for pt in grid_plan
+                    ],
+                ),
+                Dimension(name="y", count=h, type="space", unit="um", scale=px_size),
+                Dimension(name="x", count=w, type="space", unit="um", scale=px_size),
+            ],
+            dtype="uint16",
+            overwrite=True,
+        )
+        self._mmc.setProperty("SimObjectiveTurret", "Label", LOW_RES_LABEL)
+        with create_stream(settings) as self._low_stream:
+            yield from MDASequence(grid_plan=grid_plan).iter_events()
 
 
-    def _low_res_scan(self) -> Generator[MDAEvent, None, None]:
-        idx = 0
-        left, right = -1 * (self._fov_widths // 2), self._fov_widths // 2
-        top, bottom = -1 * (self._fov_heights // 2), self._fov_heights // 2
-        # Snake scan
-        for y in range(top, bottom + 1):
-            start = left if y % 2 == 0 else right
-            stop = right if start == left else left
-            step = 1 if start == left else -1
-            for x in range(start, stop + step, step):
-                self._mmc.setProperty("SimObjectiveTurret", "Label", LOW_RES_LABEL)
-                pixel_size = self._mmc.getPixelSizeUm()
-                yield MDAEvent(
-                    index={'low_idx': idx},
-                    x_pos=x * self._mmc.getImageWidth() * pixel_size,
-                    y_pos=y * self._mmc.getImageHeight() * pixel_size,
-                    keep_shutter_open=True,
-                )
-                idx += 1
+class HighResAcquisition:
 
-    def _high_res_scan(self, centroid: tuple[float, float]) -> Generator[MDAEvent, None, None]:
-        self._mmc.setProperty("SimObjectiveTurret", "Label", HIGH_RES_LABEL)
+    def __init__(self, mmcore: CMMCorePlus) -> None:
+        self._mmc = mmcore
+        self._viewer = ndv.ArrayViewer()
+        self._viewer.widget().setWindowTitle("High-res scans")
+        self._viewer.show()
 
-        self._high_res_index += 1
-        y_um, x_um = centroid
-        print(f"Snapping a single image at ({y_um}, {x_um})")
-        yield MDAEvent(
-            index={'high_idx': self._high_res_index},
-            x_pos=x_um,
-            y_pos=y_um,
-            keep_shutter_open=True,
+    def prepare(self, centroids: list[tuple[float, float]]) -> None:
+        self._centroids = centroids
+        w, h = self._mmc.getImageWidth(), self._mmc.getImageHeight()
+        px_size = self._mmc.getPixelSizeUm()
+        self._settings = AcquisitionSettings(
+            root_path=str(DATA_PATH / "high_res.ome.zarr"),
+            dimensions=[
+                Dimension(
+                    name="p",
+                    type="position",
+                    coords=[
+                        Position(name=f"POI_{i}", x_coord=x_um, y_coord=y_um)
+                        for i, (y_um, x_um) in enumerate(centroids)
+                    ],
+                ),
+                Dimension(name="y", count=h, type="space", unit="um", scale=px_size),
+                Dimension(name="x", count=w, type="space", unit="um", scale=px_size),
+            ],
+            dtype="uint16",
+            overwrite=True,
         )
 
+    @ensure_main_thread
+    def _connect_view(self, view: StreamView) -> None:
+        self._viewer.data = view
+        view.coords_changed.connect(ensure_main_thread(self._viewer.data_wrapper.dims_changed))
+        view.coords_changed.connect(ensure_main_thread(self._viewer.data_wrapper.data_changed))
+
+    def _on_image(self, img: np.ndarray, event: MDAEvent, _: dict) -> None:
+        if "p" not in event.index:
+            return
+        self._high_stream.append(img)
+
+    def events(self) -> Generator[MDAEvent, None, None]:
+        self._mmc.setProperty("SimObjectiveTurret", "Label", HIGH_RES_LABEL)
+        self._mmc.mda.events.frameReady.connect(self._on_image)
+        positions = [
+            UseqPosition(x=x_um, y=y_um, name=f"POI_{i}")
+            for i, (y_um, x_um) in enumerate(self._centroids)
+        ]
+        with create_stream(self._settings) as self._high_stream:
+            self._connect_view(self._high_stream.view())
+            yield from MDASequence(stage_positions=positions).iter_events()
+        self._mmc.mda.events.frameReady.disconnect(self._on_image)
+
+
 def main() -> None:
+    mmc = initialize_core()
+    low_res = LowResAcquisition(mmc)
+    high_res = HighResAcquisition(mmc)
 
-    mmc: CMMCorePlus = initialize_core()
+    def start_high_res() -> None:
+        mmc.mda.events.sequenceFinished.disconnect(start_high_res)
+        centroids = low_res.centroids
+        if centroids:
+            high_res.prepare(centroids)
+            mmc.run_mda(high_res.events())
 
-    acq = DataDrivenAcquisition(mmc)
-    mmc.run_mda(acq.events())
+    mmc.mda.events.sequenceFinished.connect(start_high_res)
+    mmc.run_mda(low_res.events())
     ndv.run_app()
+
 
 if __name__ == "__main__":
     main()
