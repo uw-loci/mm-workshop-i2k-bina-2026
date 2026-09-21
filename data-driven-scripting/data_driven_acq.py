@@ -17,12 +17,15 @@
 # ]
 # ///
 
+from __future__ import annotations
+
+from collections import deque
+from contextlib import ExitStack
 from pathlib import Path
-from math import floor, ceil
-from typing import TYPE_CHECKING, Generator
+from typing import Generator, Iterable, Iterator
 
 import numpy as np
-from ome_writers import AcquisitionSettings, Dimension, Position, create_stream
+from ome_writers import AcquisitionSettings, Dimension, create_stream, useq_to_acquisition_settings
 from superqt.utils import ensure_main_thread
 from pymmcore_plus import CMMCorePlus
 from scipy.ndimage import center_of_mass, gaussian_filter
@@ -30,10 +33,7 @@ from scipy.ndimage import center_of_mass, gaussian_filter
 import cellcast.models.StarDist2D as sd
 
 import ndv
-from useq import MDAEvent, MDASequence, GridRowsColumns, Position as UseqPosition
-
-if TYPE_CHECKING:
-    from ome_writers import StreamView
+from useq import MDAEvent, MDASequence, GridRowsColumns
 
 ROOT_DIR = Path(__file__).resolve().parent
 CFG_PATH = ROOT_DIR / "SimCamera.cfg"
@@ -41,6 +41,11 @@ DATA_PATH = ROOT_DIR / "data"
 
 LOW_RES_LABEL = "10x 0.30NA"
 HIGH_RES_LABEL = "100x 1.40NA Oil"
+
+# TODO: Enable POI decisions based on saved low-res scans
+# TODO: Save out positional metadata for the high-res scans (maybe use ome-writers?)
+# TODO: Consider rewriting the script in multiple pieces? A low-res scan piece, then a decision piece, then a high-res scan piece
+
 
 
 def initialize_core(mmc: CMMCorePlus | None = None) -> CMMCorePlus:
@@ -63,165 +68,277 @@ def initialize_core(mmc: CMMCorePlus | None = None) -> CMMCorePlus:
     return mmc
 
 
-class LowResAcquisition:
+class DataDrivenMDASequence(Iterable[MDAEvent]):
+    """A tile-scan that injects high-res events at points of interest."""
 
-    def __init__(self, mmcore: CMMCorePlus) -> None:
-        self._mmc = mmcore
-        self._fov_widths = 3
-        self._fov_heights = 3
+    def __init__(
+        self,
+        mmc: CMMCorePlus,
+        rows: int = 7,
+        cols: int = 7,
+        *,
+        image_pois_eagerly: bool = False,
+    ) -> None:
+        self._mmc = mmc
+        self._low_res_rows = rows
+        self._low_res_cols = cols
+        self._image_pois_eagerly = image_pois_eagerly
 
-        self._visual = np.zeros(
-            (3, self._fov_heights * mmcore.getImageHeight(), self._fov_widths * mmcore.getImageWidth()),
-            dtype=np.uint16,
-        )
-        self._viewer = ndv.ArrayViewer(self._visual, channel_mode="composite", channel_axis=0)
-        self._viewer.show()
-        self._viewer.widget().setWindowTitle("Slide scan")
-
-        self._centroids: list[tuple[float, float]] = []
         self._model = sd.init_fluo(gpu=True)
-        self._mmc.mda.events.frameReady.connect(self._on_image)
+        self._queue: deque[MDAEvent] = deque()
 
-    @property
-    def centroids(self) -> list[tuple[float, float]]:
-        return self._centroids
+    # ── 1. Scanner ────────────────────────────────────────────────────────────────
 
-    def _stage_to_px(self, x_um: float, y_um: float) -> tuple[int, int]:
-        pixel_size = self._mmc.getPixelSizeUm()
-        px = int(x_um / pixel_size) + (self._fov_widths // 2) * self._mmc.getImageWidth()
-        py = int(y_um / pixel_size) + (self._fov_heights // 2) * self._mmc.getImageHeight()
-        return px, py
-
-    def _on_image(self, img: np.ndarray, event: MDAEvent, _: dict) -> None:
-        if "g" not in event.index:
-            return
-        self._low_stream.append(img)
-        h, w = self._mmc.getImageHeight(), self._mmc.getImageWidth()
-        px, py = self._stage_to_px(event.x_pos or 0, event.y_pos or 0)
-        self._visual[0, py:py + h, px:px + w] = img
-        self._viewer.data_wrapper.data_changed.emit()
-        self._process(img, event)
-
-    def _process(self, img: np.ndarray, event: MDAEvent) -> None:
-        gaussed = gaussian_filter(img, sigma=1)
-        labels = self._model.predict_fluo(gaussed).astype(np.uint16)
-        px, py = self._stage_to_px(event.x_pos or 0, event.y_pos or 0)
-        h, w = self._mmc.getImageHeight(), self._mmc.getImageWidth()
-        self._visual[1, py:py + h, px:px + w] = labels
-        pixel_size = self._mmc.getPixelSizeUm()
-        for cy, cx in center_of_mass(labels > 0, labels, index=range(1, labels.max() + 1)):
-            cx1, cx2 = floor(cx), ceil(cx)
-            cy1, cy2 = floor(cy), ceil(cy)
-            self._visual[2, py + cy1:py + cy2 + 1, px + cx1:px + cx2 + 1] = 1
-            stage_cx = (event.x_pos or 0) + (cx - w / 2) * pixel_size
-            stage_cy = (event.y_pos or 0) + (cy - h / 2) * pixel_size
-            self._centroids.append((stage_cy, stage_cx))
-
-    def events(self) -> Generator[MDAEvent, None, None]:
-        w, h = self._mmc.getImageWidth(), self._mmc.getImageHeight()
-        px_size = self._mmc.getPixelSizeUm()
-        grid_plan = GridRowsColumns(
-            rows=self._fov_heights,
-            columns=self._fov_widths,
-            fov_height=h * px_size,
-            fov_width=w * px_size,
+    def scan_sequence(self) -> MDASequence:
+        """Return the MDASequence for the low-resolution grid scan."""
+        return MDASequence(
+            grid_plan=GridRowsColumns(
+                rows=self._low_res_rows,
+                columns=self._low_res_cols,
+                fov_height=self._mmc.getImageHeight() * self._mmc.getPixelSizeUm(),
+                fov_width=self._mmc.getImageWidth() * self._mmc.getPixelSizeUm(),
+            )
         )
+
+    def _scan_events(self) -> Generator[MDAEvent, None, None]:
+        """Yield low-resolution grid scan events."""
+        for event in self.scan_sequence().iter_events():
+            # TODO It'd be great to inscribe these within scan_sequence() itself,
+            # but that would require upstream changes.
+            yield event.model_copy(update={
+                "metadata": {**event.metadata, "source": "scan"},
+                "properties": [("SimObjectiveTurret", "Label", LOW_RES_LABEL)],  # type: ignore[arg-type]
+            })
+
+    # ── 2. Decision ───────────────────────────────────────────────────────────────
+
+    def _find_nuclei(self, img: np.ndarray, event: MDAEvent) -> list[tuple[float, float]]:
+        """Return stage-space (y_um, x_um) centroids of nuclei detected in img."""
+        gaussed = gaussian_filter(img, sigma=1)
+        labels = self._model.predict_fluo(gaussed).astype(np.uint16)  # type: ignore[attr-defined]
+        if not labels.max():
+            return []
+        h, w = img.shape[-2], img.shape[-1]
+        px_size = self._mmc.getPixelSizeUm()
+        centroids = []
+        for cy, cx in center_of_mass(labels > 0, labels, index=range(1, labels.max() + 1)):
+            stage_cx = (event.x_pos or 0) - (cx - w / 2) * px_size
+            stage_cy = (event.y_pos or 0) + (cy - h / 2) * px_size
+            centroids.append((stage_cy, stage_cx))
+        return centroids
+
+    # ── 3. Actuator ───────────────────────────────────────────────────────────────
+
+    def _inject_events(self, centroids: list[tuple[float, float]]) -> None:
+        """Inject high-resolution events for each centroid into the queue."""
+        events = [
+            MDAEvent(
+                x_pos=x_um,
+                y_pos=y_um,
+                properties=[("SimObjectiveTurret", "Label", HIGH_RES_LABEL)],  # type: ignore[arg-type]
+                metadata={"source": "data_driven", "poi_index": i},
+            )
+            for i, (y_um, x_um) in enumerate(centroids)
+        ]
+        if self._image_pois_eagerly:
+            self._queue.extendleft(reversed(events))
+        else:
+            self._queue.extend(events)
+
+    # ── Iteration ─────────────────────────────────────────────────────────────────
+
+    def _on_frame(self, img: np.ndarray, event: MDAEvent, _: dict) -> None:
+        # frameReady fires synchronously on the MDA thread between event acquisitions,
+        # so any events injected here are in the queue before the next yield.
+        if event.metadata.get("source") == "scan":
+            centroids = self._find_nuclei(img, event)
+            if centroids:
+                self._inject_events(centroids)
+
+    def __iter__(self) -> Iterator[MDAEvent]:
+        self._queue.clear()
+        self._mmc.mda.events.frameReady.connect(self._on_frame)
+        for event in self._scan_events():
+            self._queue.append(event)
+        try:
+            while self._queue:
+                yield self._queue.popleft()
+        finally:
+            self._mmc.mda.events.frameReady.disconnect(self._on_frame)
+
+
+class ScanWriter:
+    """Writes frames of the low-resolution scan to an OME-Zarr."""
+
+    def __init__(self, mmcore: CMMCorePlus, seq: DataDrivenMDASequence) -> None:
+        scan_seq = seq.scan_sequence()
+        w, h = mmcore.getImageWidth(), mmcore.getImageHeight()
         settings = AcquisitionSettings(
             root_path=str(DATA_PATH / "low_res.ome.zarr"),
-            dimensions=[
-                Dimension(
-                    name="p",
-                    type="position",
-                    coords=[
-                        Position(
-                            name=f"Tile_{pt.name}",
-                            grid_row=pt.grid_row,
-                            grid_column=pt.grid_col,
-                            x_coord=pt.x,
-                            y_coord=pt.y,
-                        )
-                        for pt in grid_plan
-                    ],
-                ),
-                Dimension(name="y", count=h, type="space", unit="um", scale=px_size),
-                Dimension(name="x", count=w, type="space", unit="um", scale=px_size),
-            ],
+            **useq_to_acquisition_settings(scan_seq, w, h, pixel_size_um=mmcore.getPixelSizeUm()),  # type: ignore[arg-type]
             dtype="uint16",
             overwrite=True,
         )
-        self._mmc.setProperty("SimObjectiveTurret", "Label", LOW_RES_LABEL)
-        with create_stream(settings) as self._low_stream:
-            yield from MDASequence(grid_plan=grid_plan).iter_events()
+        self._stack = ExitStack()
+        self._stream = self._stack.enter_context(create_stream(settings))
+
+        mmcore.mda.events.frameReady.connect(self._on_frame)
+        mmcore.mda.events.sequenceFinished.connect(self._on_done)
+
+    def _on_frame(self, img: np.ndarray, event: MDAEvent, _: dict) -> None:
+        if event.metadata.get("source") == "scan":
+            self._stream.append(img)
+
+    def _on_done(self, _: object) -> None:
+        self._stack.close()
 
 
-class HighResAcquisition:
+class POIWriter:
+    """Writes frames of points of interest (POI) to an OME-Zarr."""
 
     def __init__(self, mmcore: CMMCorePlus) -> None:
-        self._mmc = mmcore
+        self._mmcore = mmcore
+        # TODO: Ideally we could create a stream immediately and write frames as they arrive,
+        # rather than accumulating them in memory. Unfortunately ome-writers does not yet support
+        # the writing of an unknown number of frames, so we need to wait to write until all of
+        # them are known.
+        self._frames: list[np.ndarray] = []
+        self._px_size: float = 1.0
+
+        mmcore.mda.events.frameReady.connect(self._on_frame)
+        mmcore.mda.events.sequenceFinished.connect(self._on_done)
+
+    def _on_frame(self, img: np.ndarray, event: MDAEvent, _: dict) -> None:
+        if event.metadata.get("source") != "data_driven":
+            return
+        if not self._frames:
+            self._px_size = self._mmcore.getPixelSizeUm()
+        self._frames.append(img)
+
+    def _on_done(self, _: object) -> None:
+        if not self._frames:
+            return
+        n = len(self._frames)
+        h, w = self._frames[0].shape[-2], self._frames[0].shape[-1]
+        settings = AcquisitionSettings(
+            root_path=str(DATA_PATH / "high_res.ome.zarr"),
+            dimensions=(
+                Dimension(name="p", count=n),
+                Dimension(name="y", count=h, scale=self._px_size, unit="micrometer"),
+                Dimension(name="x", count=w, scale=self._px_size, unit="micrometer"),
+            ),
+            dtype="uint16",
+            overwrite=True,
+        )
+        with create_stream(settings) as stream:
+            for frame in self._frames:
+                stream.append(frame)
+
+
+class ScanViewer:
+    """Assembles low-res tiles into a live slide map as frames arrive."""
+
+    def __init__(self, mmcore: CMMCorePlus) -> None:
+        self._mmcore = mmcore
+        self._visual = np.zeros(
+            (3, mmcore.getImageHeight(), mmcore.getImageWidth()),
+            dtype=np.uint16,
+        )
+        self._min_pos: list[float | None] = [None, None]  # [max_x_um, min_y_um] of top-left corner (x-axis inverted)
+
+        self._viewer = ndv.ArrayViewer(self._visual, channel_mode="composite", channel_axis=0)
+        self._viewer.widget().setWindowTitle("Slide scan")
+        self._viewer.show()
+
+        mmcore.mda.events.frameReady.connect(self._on_frame)
+
+    def _on_frame(self, img: np.ndarray, event: MDAEvent) -> None:
+        if event.metadata.get("source") != "scan":
+            return
+
+        h, w = img.shape[-2], img.shape[-1]
+        px_size = self._mmcore.getPixelSizeUm() or 1.0
+        x_um = event.x_pos or 0.0
+        y_um = event.y_pos or 0.0
+
+        x0, y0 = self._min_pos[0], self._min_pos[1]
+        if x0 is None or y0 is None:
+            x0 = x_um
+            y0 = y_um
+            self._min_pos[0] = x0
+            self._min_pos[1] = y0
+
+        # Expand canvas to the top or left if this frame falls outside current bounds
+        shift_col = max(0, round((x_um - x0) / px_size))  # x-axis inverted: larger x_um → left
+        shift_row = max(0, round((y0 - y_um) / px_size))
+        if shift_col > 0 or shift_row > 0:
+            x0 = max(x0, x_um)
+            y0 = min(y0, y_um)
+            self._min_pos[0] = x0
+            self._min_pos[1] = y0
+            expanded = np.zeros(
+                (3, self._visual.shape[1] + shift_row, self._visual.shape[2] + shift_col),
+                dtype=self._visual.dtype,
+            )
+            expanded[:, shift_row:, shift_col:] = self._visual
+            self._visual = expanded
+
+        col = round((x0 - x_um) / px_size)  # x-axis inverted
+        row = round((y_um - y0) / px_size)
+
+        # Expand canvas to the right or bottom if this frame falls outside current bounds
+        new_h = max(self._visual.shape[1], row + h)
+        new_w = max(self._visual.shape[2], col + w)
+        if new_h > self._visual.shape[1] or new_w > self._visual.shape[2]:
+            expanded = np.zeros((3, new_h, new_w), dtype=self._visual.dtype)
+            expanded[:, :self._visual.shape[1], :self._visual.shape[2]] = self._visual
+            self._visual = expanded
+
+        self._visual[0, row:row + h, col:col + w] = img
+        self._refresh(self._visual)
+
+    @ensure_main_thread
+    def _refresh(self, data: np.ndarray) -> None:
+        self._viewer.data = data
+        self._viewer.data_wrapper.data_changed.emit()
+
+
+class PoiViewer:
+    """Accumulates high-res POI frames into a growing stack as they arrive."""
+
+    def __init__(self, mmcore: CMMCorePlus) -> None:
+        self._poi_stack: list[np.ndarray] = []
         self._viewer = ndv.ArrayViewer()
         self._viewer.widget().setWindowTitle("High-res scans")
         self._viewer.show()
 
-    def prepare(self, centroids: list[tuple[float, float]]) -> None:
-        self._centroids = centroids
-        w, h = self._mmc.getImageWidth(), self._mmc.getImageHeight()
-        px_size = self._mmc.getPixelSizeUm()
-        self._settings = AcquisitionSettings(
-            root_path=str(DATA_PATH / "high_res.ome.zarr"),
-            dimensions=[
-                Dimension(
-                    name="p",
-                    type="position",
-                    coords=[
-                        Position(name=f"POI_{i}", x_coord=x_um, y_coord=y_um)
-                        for i, (y_um, x_um) in enumerate(centroids)
-                    ],
-                ),
-                Dimension(name="y", count=h, type="space", unit="um", scale=px_size),
-                Dimension(name="x", count=w, type="space", unit="um", scale=px_size),
-            ],
-            dtype="uint16",
-            overwrite=True,
-        )
+        mmcore.mda.events.frameReady.connect(self._on_frame)
+
+    def _on_frame(self, img: np.ndarray, event: MDAEvent) -> None:
+        if event.metadata.get("source") != "data_driven":
+            return
+        self._poi_stack.append(img)
+        self._refresh(np.stack(self._poi_stack))
 
     @ensure_main_thread
-    def _connect_view(self, view: StreamView) -> None:
-        self._viewer.data = view
-        view.coords_changed.connect(ensure_main_thread(self._viewer.data_wrapper.dims_changed))
-        view.coords_changed.connect(ensure_main_thread(self._viewer.data_wrapper.data_changed))
+    def _refresh(self, data: np.ndarray) -> None:
+        self._viewer.data = data
+        self._viewer.data_wrapper.data_changed.emit()
 
-    def _on_image(self, img: np.ndarray, event: MDAEvent, _: dict) -> None:
-        if "p" not in event.index:
-            return
-        self._high_stream.append(img)
 
-    def events(self) -> Generator[MDAEvent, None, None]:
-        self._mmc.setProperty("SimObjectiveTurret", "Label", HIGH_RES_LABEL)
-        self._mmc.mda.events.frameReady.connect(self._on_image)
-        positions = [
-            UseqPosition(x=x_um, y=y_um, name=f"POI_{i}")
-            for i, (y_um, x_um) in enumerate(self._centroids)
-        ]
-        with create_stream(self._settings) as self._high_stream:
-            self._connect_view(self._high_stream.view())
-            yield from MDASequence(stage_positions=positions).iter_events()
-        self._mmc.mda.events.frameReady.disconnect(self._on_image)
-
+# ── Main ──────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     mmc = initialize_core()
-    low_res = LowResAcquisition(mmc)
-    high_res = HighResAcquisition(mmc)
+    seq = DataDrivenMDASequence(mmc, image_pois_eagerly=True)
 
-    def start_high_res() -> None:
-        mmc.mda.events.sequenceFinished.disconnect(start_high_res)
-        centroids = low_res.centroids
-        if centroids:
-            high_res.prepare(centroids)
-            mmc.run_mda(high_res.events())
+    slide_viewer = ScanViewer(mmc)  # noqa: F841
+    slide_writer = ScanWriter(mmc, seq)  # noqa: F841
 
-    mmc.mda.events.sequenceFinished.connect(start_high_res)
-    mmc.run_mda(low_res.events())
+    poi_viewer = PoiViewer(mmc)  # noqa: F841
+    poi_writer = POIWriter(mmc)  # noqa: F841
+
+    mmc.run_mda(seq)
     ndv.run_app()
 
 
