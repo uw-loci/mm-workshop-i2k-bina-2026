@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Generator, Iterable, Iterator
 
 import numpy as np
-from ome_writers import AcquisitionSettings, Dimension, create_stream, useq_to_acquisition_settings
+from ome_writers import AcquisitionSettings, Dimension, Position, create_stream, useq_to_acquisition_settings
 from superqt.utils import ensure_main_thread
 from pymmcore_plus import CMMCorePlus
 from scipy.ndimage import center_of_mass, gaussian_filter
@@ -43,10 +43,7 @@ LOW_RES_LABEL = "10x 0.30NA"
 HIGH_RES_LABEL = "100x 1.40NA Oil"
 
 # TODO: Enable POI decisions based on saved low-res scans
-# TODO: Save out positional metadata for the high-res scans (maybe use ome-writers?)
 # TODO: Consider rewriting the script in multiple pieces? A low-res scan piece, then a decision piece, then a high-res scan piece
-
-
 
 def initialize_core(mmc: CMMCorePlus | None = None) -> CMMCorePlus:
     mmc = mmc or CMMCorePlus()
@@ -173,6 +170,7 @@ class ScanWriter:
     def __init__(self, mmcore: CMMCorePlus, seq: DataDrivenMDASequence) -> None:
         scan_seq = seq.scan_sequence()
         w, h = mmcore.getImageWidth(), mmcore.getImageHeight()
+        # NB The next release of ome-writers will save the positions to OME-Zarr correctly
         settings = AcquisitionSettings(
             root_path=str(DATA_PATH / "low_res.ome.zarr"),
             **useq_to_acquisition_settings(scan_seq, w, h, pixel_size_um=mmcore.getPixelSizeUm()),  # type: ignore[arg-type]
@@ -202,7 +200,7 @@ class POIWriter:
         # rather than accumulating them in memory. Unfortunately ome-writers does not yet support
         # the writing of an unknown number of frames, so we need to wait to write until all of
         # them are known.
-        self._frames: list[np.ndarray] = []
+        self._pois: list[tuple[np.ndarray, MDAEvent]] = []
         self._px_size: float = 1.0
 
         mmcore.mda.events.frameReady.connect(self._on_frame)
@@ -211,19 +209,23 @@ class POIWriter:
     def _on_frame(self, img: np.ndarray, event: MDAEvent, _: dict) -> None:
         if event.metadata.get("source") != "data_driven":
             return
-        if not self._frames:
-            self._px_size = self._mmcore.getPixelSizeUm()
-        self._frames.append(img)
+        self._px_size = self._mmcore.getPixelSizeUm()
+        self._pois.append((img, event))
 
     def _on_done(self, _: object) -> None:
-        if not self._frames:
+        if not self._pois:
             return
-        n = len(self._frames)
-        h, w = self._frames[0].shape[-2], self._frames[0].shape[-1]
+        h, w = self._pois[0][0].shape[-2], self._pois[0][0].shape[-1]
+        # NB The next release of ome-writers will save the positions to OME-Zarr correctly
+        coords = [Position(
+            name=f"POI_{i}",
+            x_coord=event.x_pos or 0.0,
+            y_coord=event.y_pos or 0.0
+        ) for i, (_, event) in enumerate(self._pois)]
         settings = AcquisitionSettings(
             root_path=str(DATA_PATH / "high_res.ome.zarr"),
             dimensions=(
-                Dimension(name="p", count=n),
+                Dimension(name="p", type="position", coords=coords),
                 Dimension(name="y", count=h, scale=self._px_size, unit="micrometer"),
                 Dimension(name="x", count=w, scale=self._px_size, unit="micrometer"),
             ),
@@ -231,7 +233,7 @@ class POIWriter:
             overwrite=True,
         )
         with create_stream(settings) as stream:
-            for frame in self._frames:
+            for frame, _ in self._pois:
                 stream.append(frame)
 
 
