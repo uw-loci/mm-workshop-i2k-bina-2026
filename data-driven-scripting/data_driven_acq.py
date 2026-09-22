@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Generator, NamedTuple
 
 import numpy as np
+from psygnal import Signal
 from pymmcore_plus import CMMCorePlus
 from scipy.ndimage import center_of_mass, gaussian_filter
 
@@ -72,6 +73,8 @@ def initialize_core(mmc: CMMCorePlus | None = None) -> CMMCorePlus:
 class NucleiFinder(DataDrivenMDA[Centroid]):
     """A tile-scan that injects high-res events at points of interest."""
 
+    labels_ready = Signal(np.ndarray, MDAEvent)
+
     def __init__(
         self,
         mmc: CMMCorePlus,
@@ -105,10 +108,9 @@ class NucleiFinder(DataDrivenMDA[Centroid]):
             })
 
     def find_events(self, img: np.ndarray, event: MDAEvent) -> Generator[Centroid, None, None]:
-        # Attenuate noise
         gaussed = gaussian_filter(img, sigma=1)
-        # Predict nuclei masks
         labels = self._model.predict_fluo(gaussed).astype(np.uint16)  # type: ignore[attr-defined]
+        self.labels_ready.emit(labels, event)
         if not labels.max():
             return
         h, w = img.shape[-2], img.shape[-1]
@@ -136,8 +138,8 @@ def main() -> None:
     mmc = initialize_core()
     seq = NucleiFinder(mmc, image_pois_eagerly=False)
 
-    slide_viewer = ScanViewer(mmc)  # noqa: F841
-    slide_writer = ScanWriter(mmc, seq.scan_sequence())  # noqa: F841
+    slide_viewer = ScanViewer(mmc, seq)  # noqa: F841
+    slide_writer = ScanWriter(mmc, seq)  # noqa: F841
 
     poi_viewer = PoiViewer(mmc)  # noqa: F841
     poi_writer = POIWriter(mmc)  # noqa: F841
