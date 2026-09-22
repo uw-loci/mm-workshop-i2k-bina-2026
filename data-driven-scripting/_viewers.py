@@ -3,35 +3,39 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import ndv
+from ndv.models import ClimsManual
+
 import numpy as np
 from pymmcore_plus import CMMCorePlus
 from superqt.utils import ensure_main_thread
 
 if TYPE_CHECKING:
     from useq import MDAEvent
+    from data_driven_acq import NucleiFinder
 
 
 class ScanViewer:
     """Assembles low-res tiles into a live slide map as frames arrive."""
 
-    def __init__(self, mmcore: CMMCorePlus) -> None:
+    def __init__(self, mmcore: CMMCorePlus, seq: "NucleiFinder") -> None:
         self._mmcore = mmcore
         self._visual = np.zeros(
-            (3, mmcore.getImageHeight(), mmcore.getImageWidth()),
+            (2, mmcore.getImageHeight(), mmcore.getImageWidth()),
             dtype=np.uint16,
         )
         self._min_pos: list[float | None] = [None, None]  # [max_x_um, min_y_um] of top-left corner (x-axis inverted)
 
         self._viewer = ndv.ArrayViewer(self._visual, channel_mode="composite", channel_axis=0)
+        self._viewer.display_model.luts[0].name = "slide scan"
+        self._viewer.display_model.luts[1].name = "detected nuclei"
+        self._viewer.display_model.luts[1].clims = ClimsManual(min=0, max=1)
         self._viewer.widget().setWindowTitle("Slide scan")
         self._viewer.show()
 
+        seq.labels_ready.connect(self.on_labels)
         mmcore.mda.events.frameReady.connect(self._on_frame)
 
-    def _on_frame(self, img: np.ndarray, event: MDAEvent) -> None:
-        if event.metadata.get("source") != "steady_state":
-            return
-
+    def _place_tile(self, channel: int, img: np.ndarray, event: MDAEvent) -> None:
         h, w = img.shape[-2], img.shape[-1]
         px_size = self._mmcore.getPixelSizeUm() or 1.0
         x_um = event.x_pos or 0.0
@@ -53,7 +57,7 @@ class ScanViewer:
             self._min_pos[0] = x0
             self._min_pos[1] = y0
             expanded = np.zeros(
-                (3, self._visual.shape[1] + shift_row, self._visual.shape[2] + shift_col),
+                (2, self._visual.shape[1] + shift_row, self._visual.shape[2] + shift_col),
                 dtype=self._visual.dtype,
             )
             expanded[:, shift_row:, shift_col:] = self._visual
@@ -66,12 +70,19 @@ class ScanViewer:
         new_h = max(self._visual.shape[1], row + h)
         new_w = max(self._visual.shape[2], col + w)
         if new_h > self._visual.shape[1] or new_w > self._visual.shape[2]:
-            expanded = np.zeros((3, new_h, new_w), dtype=self._visual.dtype)
+            expanded = np.zeros((2, new_h, new_w), dtype=self._visual.dtype)
             expanded[:, :self._visual.shape[1], :self._visual.shape[2]] = self._visual
             self._visual = expanded
 
-        self._visual[0, row:row + h, col:col + w] = img
+        self._visual[channel, row:row + h, col:col + w] = img
         self._refresh(self._visual)
+
+    def _on_frame(self, img: np.ndarray, event: MDAEvent) -> None:
+        if event.metadata.get("source") == "steady_state":
+            self._place_tile(0, img, event)
+
+    def on_labels(self, labels: np.ndarray, event: MDAEvent) -> None:
+        self._place_tile(1, labels, event)
 
     @ensure_main_thread
     def _refresh(self, data: np.ndarray) -> None:

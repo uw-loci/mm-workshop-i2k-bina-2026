@@ -9,7 +9,8 @@ from ome_writers import AcquisitionSettings, Dimension, Position, create_stream,
 from pymmcore_plus import CMMCorePlus
 
 if TYPE_CHECKING:
-    from useq import MDAEvent, MDASequence
+    from useq import MDAEvent
+    from data_driven_acq import NucleiFinder
 
 DATA_PATH = Path(__file__).resolve().parent / "data"
 
@@ -17,12 +18,12 @@ DATA_PATH = Path(__file__).resolve().parent / "data"
 class ScanWriter:
     """Writes frames of the low-resolution scan to an OME-Zarr."""
 
-    def __init__(self, mmcore: CMMCorePlus, scan_seq: MDASequence) -> None:
+    def __init__(self, mmcore: CMMCorePlus, seq: "NucleiFinder") -> None:
         w, h = mmcore.getImageWidth(), mmcore.getImageHeight()
         # NB The next release of ome-writers will save the positions to OME-Zarr correctly
         settings = AcquisitionSettings(
             root_path=str(DATA_PATH / "low_res.ome.zarr"),
-            **useq_to_acquisition_settings(scan_seq, w, h, pixel_size_um=mmcore.getPixelSizeUm()),  # type: ignore[arg-type]
+            **useq_to_acquisition_settings(seq.scan_sequence(), w, h, pixel_size_um=mmcore.getPixelSizeUm()),  # type: ignore[arg-type]
             dtype="uint16",
             overwrite=True,
         )
