@@ -27,7 +27,7 @@ from psygnal import Signal
 from pymmcore_plus import CMMCorePlus
 from scipy.ndimage import center_of_mass, gaussian_filter
 
-import cellcast.models.StarDist2D as sd
+import cellcast.models.StarDist2D as sd # type: ignore
 
 import ndv
 from useq import MDAEvent, MDASequence, GridRowsColumns
