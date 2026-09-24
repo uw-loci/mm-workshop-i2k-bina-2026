@@ -55,9 +55,9 @@ three overridable hooks:
 
 | Method | Role |
 |--------|------|
-| `steady_state()` | Yield the baseline sequence of acquisition events |
-| `find_events(img, event)` | Analyse a frame and yield events (objects, processes, etc.) of interest |
-| `actuate_event(item)` | Yield one or more `MDAEvent`s in response to a detected event |
+| `steady_state()` | Return the baseline sequence of acquisition events |
+| `find_targets(img, event)` | Analyse a frame and return targets (objects, processes, etc.) of interest |
+| `act_on_target(target)` | Return one or more `MDAEvent`s in response to a detected target |
 
 `NucleiFinder` in [`data_driven_acq.py`](data_driven_acq.py) implements this pattern concretely for our particular use case.
 
