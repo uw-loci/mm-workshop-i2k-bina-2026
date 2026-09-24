@@ -13,7 +13,7 @@
 #   "scipy==1.18.1",
 #   "tensorstore==0.1.85",
 #   "useq-schema==0.9.2",
-#   "vispy == 0.17.0",
+#   "vispy==0.17.0",
 # ]
 # ///
 
@@ -81,9 +81,9 @@ class NucleiFinder(DataDrivenMDA[Centroid]):
         rows: int = 7,
         cols: int = 7,
         *,
-        image_pois_eagerly: bool = False,
+        act_eagerly: bool = False,
     ) -> None:
-        super().__init__(mmc, image_pois_eagerly=image_pois_eagerly)
+        super().__init__(mmc, act_eagerly=act_eagerly)
         self._low_res_rows = rows
         self._low_res_cols = cols
         self._model = sd.init_fluo(gpu=True)
@@ -107,7 +107,7 @@ class NucleiFinder(DataDrivenMDA[Centroid]):
                 "properties": [("SimObjectiveTurret", "Label", LOW_RES_LABEL)],  # type: ignore[arg-type]
             })
 
-    def find_events(self, img: np.ndarray, event: MDAEvent) -> Generator[Centroid, None, None]:
+    def find_targets(self, img: np.ndarray, event: MDAEvent) -> Generator[Centroid, None, None]:
         gaussed = gaussian_filter(img, sigma=1)
         labels = self._model.predict_fluo(gaussed).astype(np.uint16)  # type: ignore[attr-defined]
         self.labels_ready.emit(labels, event)
@@ -123,11 +123,11 @@ class NucleiFinder(DataDrivenMDA[Centroid]):
                 x_um=(event.x_pos or 0) - (cx - w / 2) * px_size,
             )
 
-    def actuate_event(self, item: Centroid) -> Generator[MDAEvent, None, None]:
+    def act_on_target(self, target: Centroid) -> Generator[MDAEvent, None, None]:
         # Perform a single high-resolution snapshot at the detected centroid
         yield MDAEvent(
-            x_pos=item.x_um,
-            y_pos=item.y_um,
+            x_pos=target.x_um,
+            y_pos=target.y_um,
             properties=[("SimObjectiveTurret", "Label", HIGH_RES_LABEL)],  # type: ignore[arg-type]
         )
 
@@ -136,7 +136,7 @@ class NucleiFinder(DataDrivenMDA[Centroid]):
 
 def main() -> None:
     mmc = initialize_core()
-    seq = NucleiFinder(mmc, image_pois_eagerly=False)
+    seq = NucleiFinder(mmc, act_eagerly=False)
 
     slide_viewer = ScanViewer(mmc, seq)  # noqa: F841
     slide_writer = ScanWriter(mmc, seq)  # noqa: F841
