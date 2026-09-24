@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import TYPE_CHECKING, Generic, Generator, Iterable, Iterator, TypeVar
+from typing import TYPE_CHECKING, Generic, Iterable, Iterator, TypeVar
 
 from pymmcore_plus import CMMCorePlus
 from useq import MDAEvent
@@ -32,18 +32,18 @@ class DataDrivenMDA(Iterable[MDAEvent], Generic[T], ABC):
     # -- These methods must be implemented -- #
 
     @abstractmethod
-    def steady_state(self) -> Generator[MDAEvent, None, None]:
-        """Yield the baseline sequence of acquisition events."""
+    def steady_state(self) -> Iterable[MDAEvent]:
+        """Return the baseline sequence of acquisition events."""
 
     # -- These methods should be implemented -- #
 
-    def find_targets(self, _img: np.ndarray, _event: MDAEvent) -> Generator[T, None, None]:
-        """Yield targets found in a frame."""
-        yield from () # no-op
+    def find_targets(self, _img: np.ndarray, _event: MDAEvent) -> Iterable[T]:
+        """Return targets found in a frame."""
+        return ()
 
-    def act_on_target(self, _target: T) -> Generator[MDAEvent, None, None]:
-        """Yield MDA events in response to a target."""
-        yield from () # no-op
+    def act_on_target(self, _target: T) -> Iterable[MDAEvent]:
+        """Return MDA events in response to a target."""
+        return ()
 
     # -- These methods are internal details -- #
 
@@ -64,6 +64,21 @@ class DataDrivenMDA(Iterable[MDAEvent], Generic[T], ABC):
             return
         self._queue.extend(new_events)
 
+    def _drain_queue(self) -> Iterator[MDAEvent]:
+        if not self._queue:
+            return
+        # Snapshot current values of any properties queued events will modify,
+        # so we can revert them after all events are done (without an extra snap).
+        to_revert: dict[tuple[str, str], str] = {}
+        while self._queue:
+            event = self._queue.popleft()
+            for dev, prop, _ in (event.properties or []):
+                if (dev, prop) not in to_revert:
+                    to_revert[dev, prop] = self._mmc.getProperty(dev, prop)
+            yield event
+        for (dev, prop), val in to_revert.items():
+            self._mmc.setProperty(dev, prop, val)
+
     def __iter__(self) -> Iterator[MDAEvent]:
         self._queue.clear()
         self._mmc.mda.events.frameReady.connect(self._on_frame)
@@ -71,9 +86,7 @@ class DataDrivenMDA(Iterable[MDAEvent], Generic[T], ABC):
             for event in self.steady_state():
                 yield event.model_copy(update={"metadata": {**event.metadata, "source": "steady_state"}})
                 if self._act_eagerly:
-                    while self._queue:
-                        yield self._queue.popleft()
-            while self._queue:
-                yield self._queue.popleft()
+                    yield from self._drain_queue()
+            yield from self._drain_queue()
         finally:
             self._mmc.mda.events.frameReady.disconnect(self._on_frame)

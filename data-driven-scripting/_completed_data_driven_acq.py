@@ -25,11 +25,12 @@ from typing import Iterable, NamedTuple
 import numpy as np
 from psygnal import Signal
 from pymmcore_plus import CMMCorePlus
+from scipy.ndimage import center_of_mass, gaussian_filter
 
 import cellcast.models.StarDist2D as sd # type: ignore
 
 import ndv
-from useq import MDAEvent
+from useq import MDAEvent, MDASequence, GridRowsColumns
 
 from data_driven_mda import DataDrivenMDA
 from _writers import ScanWriter, POIWriter
@@ -65,6 +66,7 @@ def initialize_core(mmc: CMMCorePlus | None = None) -> CMMCorePlus:
 
     mmc.setProperty("SimCam", "Mode", "Nuclei")
     mmc.setAutoShutter(False)
+    mmc.setProperty("SimObjectiveTurret", "Label", LOW_RES_LABEL)
 
     return mmc
 
@@ -87,17 +89,39 @@ class NucleiFinder(DataDrivenMDA[Centroid]):
         self._low_res_cols = cols
         self._model = sd.init_fluo(gpu=True)
 
-    def steady_state(self) -> Iterable[MDAEvent]:
-        # TODO: Implement!
-        return ()
+    def steady_state(self) -> MDASequence:
+        """Return the MDASequence for the low-resolution grid scan."""
+        return MDASequence(
+            grid_plan=GridRowsColumns(
+                rows=self._low_res_rows,
+                columns=self._low_res_cols,
+                fov_height=self._mmc.getImageHeight() * self._mmc.getPixelSizeUm(),
+                fov_width=self._mmc.getImageWidth() * self._mmc.getPixelSizeUm(),
+            )
+        )
 
     def find_targets(self, img: np.ndarray, event: MDAEvent) -> Iterable[Centroid]:
-        # TODO: Implement!
-        return ()
+        gaussed = gaussian_filter(img, sigma=1)
+        labels = self._model.predict_fluo(gaussed).astype(np.uint16)  # type: ignore[attr-defined]
+        self.labels_ready.emit(labels, event)
+        if not labels.max():
+            return
+        h, w = img.shape[-2], img.shape[-1]
+        px_size = self._mmc.getPixelSizeUm()
+        # Each centroid corresponds to a detected nucleus in the image...
+        for cy, cx in center_of_mass(labels > 0, labels, index=range(1, labels.max() + 1)):
+            # ...which we need to convert to stage coordinates
+            yield Centroid(
+                y_um=(event.y_pos or 0) + (cy - h / 2) * px_size,
+                x_um=(event.x_pos or 0) - (cx - w / 2) * px_size,
+            )
 
     def act_on_target(self, target: Centroid) -> Iterable[MDAEvent]:
-        # TODO: Implement!
-        return ()
+        yield MDAEvent(
+            x_pos=target.x_um,
+            y_pos=target.y_um,
+            properties=[("SimObjectiveTurret", "Label", HIGH_RES_LABEL)],  # type: ignore[arg-type]
+        )
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────────

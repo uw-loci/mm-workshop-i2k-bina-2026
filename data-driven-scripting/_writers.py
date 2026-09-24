@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -7,10 +8,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 from ome_writers import AcquisitionSettings, Dimension, Position, create_stream, useq_to_acquisition_settings
 from pymmcore_plus import CMMCorePlus
+from useq import MDASequence
 
 if TYPE_CHECKING:
     from useq import MDAEvent
-    from data_driven_acq import NucleiFinder
+    from data_driven_mda import DataDrivenMDA
 
 DATA_PATH = Path(__file__).resolve().parent / "data"
 
@@ -18,12 +20,21 @@ DATA_PATH = Path(__file__).resolve().parent / "data"
 class ScanWriter:
     """Writes frames of the low-resolution scan to an OME-Zarr."""
 
-    def __init__(self, mmcore: CMMCorePlus, seq: "NucleiFinder") -> None:
+    def __init__(self, mmcore: CMMCorePlus, seq: "DataDrivenMDA") -> None:
+        ss = seq.steady_state()
+        if not isinstance(ss, MDASequence):
+            warnings.warn(
+                "ScanWriter requires steady_state() to return an MDASequence. "
+                "Scan frames will not be saved.",
+                stacklevel=2,
+            )
+            return
+
         w, h = mmcore.getImageWidth(), mmcore.getImageHeight()
         # NB The next release of ome-writers will save the positions to OME-Zarr correctly
         settings = AcquisitionSettings(
             root_path=str(DATA_PATH / "low_res.ome.zarr"),
-            **useq_to_acquisition_settings(seq.scan_sequence(), w, h, pixel_size_um=mmcore.getPixelSizeUm()),  # type: ignore[arg-type]
+            **useq_to_acquisition_settings(ss, w, h, pixel_size_um=mmcore.getPixelSizeUm()),  # type: ignore[arg-type]
             dtype="uint16",
             overwrite=True,
         )
