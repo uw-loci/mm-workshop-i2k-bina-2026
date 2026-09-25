@@ -105,11 +105,11 @@ class NucleiFinder(DataDrivenMDA[Centroid]):
         labels = self._model.predict_fluo(gaussed).astype(np.uint16)  # type: ignore[attr-defined]
         self.labels_ready.emit(labels, event)
         if not labels.max():
-            return
+            return ()
         h, w = img.shape[-2], img.shape[-1]
         px_size = self._mmc.getPixelSizeUm()
         # Each centroid corresponds to a detected nucleus in the image...
-        centroids = center_of_mass(labels > 0, labels, index=range(1, labels.max() + 1)):
+        centroids = center_of_mass(labels > 0, labels, index=range(1, labels.max() + 1))
         # ...which we need to convert to stage coordinates
         stage_centroids = []
         for cy, cx in centroids:
@@ -120,11 +120,11 @@ class NucleiFinder(DataDrivenMDA[Centroid]):
         return stage_centroids
 
     def act_on_target(self, target: Centroid) -> Iterable[MDAEvent]:
-        return (MDAEvent(
+        return [MDAEvent(
             x_pos=target.x_um,
             y_pos=target.y_um,
             properties=[("SimObjectiveTurret", "Label", HIGH_RES_LABEL)],  # type: ignore[arg-type]
-        ))
+        )]
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────────
