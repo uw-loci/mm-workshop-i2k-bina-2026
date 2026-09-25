@@ -109,19 +109,22 @@ class NucleiFinder(DataDrivenMDA[Centroid]):
         h, w = img.shape[-2], img.shape[-1]
         px_size = self._mmc.getPixelSizeUm()
         # Each centroid corresponds to a detected nucleus in the image...
-        for cy, cx in center_of_mass(labels > 0, labels, index=range(1, labels.max() + 1)):
-            # ...which we need to convert to stage coordinates
-            yield Centroid(
+        centroids = center_of_mass(labels > 0, labels, index=range(1, labels.max() + 1)):
+        # ...which we need to convert to stage coordinates
+        stage_centroids = []
+        for cy, cx in centroids:
+            stage_centroids.append(Centroid(
                 y_um=(event.y_pos or 0) + (cy - h / 2) * px_size,
                 x_um=(event.x_pos or 0) - (cx - w / 2) * px_size,
-            )
+            ))
+        return stage_centroids
 
     def act_on_target(self, target: Centroid) -> Iterable[MDAEvent]:
-        yield MDAEvent(
+        return (MDAEvent(
             x_pos=target.x_um,
             y_pos=target.y_um,
             properties=[("SimObjectiveTurret", "Label", HIGH_RES_LABEL)],  # type: ignore[arg-type]
-        )
+        ))
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────────
