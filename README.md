@@ -4,6 +4,12 @@ This repository will contain instructions and materials for the workshop titled 
 
 ## Pre-workshop instructions (software installation)
 
-> [!NOTE]
-> Please check back an a few days! (Instructions for installing Micro-Manager,
-> Python, uv, and a few additional items will be provided here.)
+If you'd like to try out Micro-Manager as you follow along, please install it according to our specific instructions [here](install-mm.md). This includes instructions for installing the SimulatedMicroscope device which is not part of the official Micro-Manager installer yet.
+
+For the Python scripting section, you'll need `uv` to try the hands-on examples. Follow the official install instructions [here](https://docs.astral.sh/uv/#installation). You're good to go if the following command prints "uv works" in green:
+
+```sh
+uv run --with rich python -c "import rich; rich.print('[bold green]uv works[/bold green]')"
+```
+
+(Thank you for your patience if you've checked here earlier and were awaiting these instructions.)
