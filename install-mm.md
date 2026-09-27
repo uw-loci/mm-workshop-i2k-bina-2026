@@ -8,6 +8,10 @@
 
 2. Then, download the [SimulatedMicroscope device adapter](https://github.com/marktsuchida/mmdev-SimulatedMicroscope/releases/download/v20260926.75/mmdev-SimulatedMicroscope-windows-x86_64-v20260926.75.zip). Place the file `mmgr_dal_SimulatedMicroscope.dll` in the Micro-Manager install folder (under Program Files if you used the default).
 
+3. Make sure you can start Micro-Manager from the desktop icon or from the
+   Start menu. It should show you a startup dialog asking you to select a
+   profile and hardware configuration.
+
 ## macOS
 
 1. Micro-Manager will only work if the *newest* Java installed on the system is Java 11 for the correct architecture. All Java installations are in `/Library/Java/JavaVirtualMachines`. Check this folder and temporarily remove any conflicting or newer versions (you can back them up and put them back later).
@@ -20,6 +24,10 @@
 3. Download and install our special build of Micro-Manager for the workshop:
     - [Apple Silicon arm64](https://github.com/uw-loci/mm-workshop-i2k-bina-2026/releases/download/macos-installers/Micro-Manager-20260925-arm64.dmg)
     - [Intel x86_64](https://github.com/uw-loci/mm-workshop-i2k-bina-2026/releases/download/macos-installers/Micro-Manager-20260925-x86_64.dmg)
+
+4. Make sure you can start Micro-Manager by double-clicking the ImageJ (or
+   ImageJ.app) icon inside the installed folder. It should show you a startup
+   dialog asking you to select a profile and hardware configuration.
 
 The special Micro-Manager builds linked here differ from the official version in the following ways:
 - They include the SimulatedMicroscope device adapter we'll use in the workshop
