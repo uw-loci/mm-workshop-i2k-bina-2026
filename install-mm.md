@@ -29,6 +29,11 @@
    ImageJ.app) icon inside the installed folder. It should show you a startup
    dialog asking you to select a profile and hardware configuration.
 
+> [!IMPORTANT]
+> The next step was added Sep 28 to patch a macOS-specific bug.
+
+5. **Download the file [miglayout-3.7.4.jar](https://repo1.maven.org/maven2/com/miglayout/miglayout/3.7.4/miglayout-3.7.4.jar) and place it in the `plugins/Micro-Manager` folder within the installed Micro-Manager folder.**
+
 The special Micro-Manager builds linked here differ from the official version in the following ways:
 - They include the SimulatedMicroscope device adapter we'll use in the workshop
 - An arm64 version is provided
