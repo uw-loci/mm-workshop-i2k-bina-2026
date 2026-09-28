@@ -43,7 +43,7 @@ class Centroid(NamedTuple):
 
 
 ROOT_DIR = Path(__file__).resolve().parent
-CFG_PATH = ROOT_DIR / "SimCamera.cfg"
+CFG_PATH = ROOT_DIR.parent / "Simulated-full.cfg"
 DATA_PATH = ROOT_DIR / "data"
 
 LOW_RES_LABEL = "10x 0.30NA"
@@ -52,20 +52,16 @@ HIGH_RES_LABEL = "100x 1.40NA Oil"
 
 def initialize_core(mmc: CMMCorePlus | None = None) -> CMMCorePlus:
     mmc = mmc or CMMCorePlus()
-    mmc.setDeviceAdapterSearchPaths([*mmc.getDeviceAdapterSearchPaths(), str(CFG_PATH.parent)])
     mmc.loadSystemConfiguration(str(CFG_PATH))
     mmc.setXYStageDevice("SimXY")
 
-    # The default slew rate is tuned to look like a real stage
-    # (~100 um/s), which would make each tile-to-tile move slow
-    # over an NxN grid. Speed it up, cut exposure, and extend the
-    # wait timeout to match.
+    # Speed up the stage movements for the simulated XY stage.
     mmc.setProperty("SimXY", "SlewTimePerStep_s", 0.0001)
-    mmc.setExposure(10.0)
     mmc.setTimeoutMs(120_000)
+    # Decrease the exposure
+    mmc.setExposure(10.0)
 
     mmc.setProperty("SimCam", "Mode", "Nuclei")
-    mmc.setAutoShutter(False)
     mmc.setProperty("SimObjectiveTurret", "Label", LOW_RES_LABEL)
 
     return mmc
