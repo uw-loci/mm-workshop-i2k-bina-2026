@@ -13,3 +13,16 @@ uv run --with rich python -c "import rich; rich.print('[bold green]uv works[/bol
 ```
 
 (Thank you for your patience if you've checked here earlier and were awaiting these instructions.)
+
+## Files used in the workshop, part 1 (Micro-Manager app)
+
+(Right-click to download.)
+
+- [Simulated-full.cfg](Simulated-full.cfg) — Full configuration for
+  SimulatedMicroscope, with pixel calibration
+
+- [Simulated-hw.cfg](Simulated-hw.cfg) — Intermediate #1: after Hardware
+  Configuration Wizard
+
+- [Simulated-groups.cfg](Simulated-groups.cfg) — Intermediate #2: after
+  creating configuration groups and presets
