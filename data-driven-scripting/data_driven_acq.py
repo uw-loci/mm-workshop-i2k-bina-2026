@@ -42,7 +42,7 @@ class Centroid(NamedTuple):
 
 
 ROOT_DIR = Path(__file__).resolve().parent
-CFG_PATH = ROOT_DIR / "SimCamera.cfg"
+CFG_PATH = ROOT_DIR.parent / "Simulated-full.cfg"
 DATA_PATH = ROOT_DIR / "data"
 
 LOW_RES_LABEL = "10x 0.30NA"
