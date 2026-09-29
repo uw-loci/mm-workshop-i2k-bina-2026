@@ -61,16 +61,6 @@ three overridable hooks:
 
 `NucleiFinder` in [`data_driven_acq.py`](data_driven_acq.py) implements this pattern concretely for our particular use case.
 
-## Files
-
-| File | Contents |
-|------|----------|
-| [`data_driven_mda.py`](data_driven_mda.py) | `DataDrivenMDA` — reusable base class |
-| [`data_driven_acq.py`](data_driven_acq.py) | `NucleiFinder`, `Centroid`, `initialize_core`, `main` |
-| [`_writers.py`](_writers.py) | `ScanWriter`, `POIWriter` — stream tiles/POIs to OME-Zarr |
-| [`_viewers.py`](_viewers.py) | `ScanViewer`, `PoiViewer` — live NDV viewers |
-| [`SimCamera.cfg`](SimCamera.cfg) | Micro-Manager config for the simulated camera/stage |
-
 ## Output
 
 Both outputs are written to the `data/` subdirectory:
