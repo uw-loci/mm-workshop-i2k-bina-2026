@@ -34,8 +34,8 @@ import ndv
 from useq import GridRowsColumns, MDAEvent, MDASequence
 
 from data_driven_mda import DataDrivenMDA
-from _writers import ScanWriter, POIWriter
-from _viewers import ScanViewer, PoiViewer
+from writers import ScanWriter, POIWriter
+from viewers import ScanViewer, PoiViewer
 
 
 class Centroid(NamedTuple):
