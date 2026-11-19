@@ -2,6 +2,8 @@
 
 This repository will contain instructions and materials for the workshop titled *Micro-Manager from GUI to Python: Interactive Control, Configuration, and Scripted Data-Driven Acquisition* at [I2KxBINA2026](https://www.bioimagingnorthamerica.org/events/i2kxbina2026/), by Mark Tsuchida and Gabriel Selzer.
 
+Workshop recording on [YouTube](https://www.youtube.com/watch?v=xDZgOc-m81c).
+
 ## Pre-workshop instructions (software installation)
 
 If you'd like to try out Micro-Manager as you follow along, please install it according to our specific instructions [here](install-mm.md). This includes instructions for installing the SimulatedMicroscope device which is not part of the official Micro-Manager installer yet.
